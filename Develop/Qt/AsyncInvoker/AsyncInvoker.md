@@ -14,7 +14,9 @@
 
 所以，最好能够有一个类似 [QTimer::singleShot()](https://doc.qt.io/qt-5/qtimer.html#singleShot)，但又可以接收任意参数个数的任意函数子的 API。
 
-考虑到异步执行时对执行结果的访问，可以参考 [std::sync()](https://en.cppreference.com/w/cpp/thread/async)，返回一个 `future` 对象。但不能直接使用 [std::future](https://en.cppreference.com/w/cpp/thread/future)——因为它的 `get` 和 `wait` 会阻塞住线程，对于 Qt 而言就会阻塞事件循环。
+> 5.3的老代码写太久，思维定势了，刚查了下5.4的 singleShot 是支持 Functor 的……那这篇文章留作该机制的技术探讨吧……
+
+考虑到异步执行时对执行结果的访问，可以参考 [std::async()](https://en.cppreference.com/w/cpp/thread/async)，返回一个 `future` 对象。但不能直接使用 [std::future](https://en.cppreference.com/w/cpp/thread/future)——因为它的 `get` 和 `wait` 会阻塞住线程，对于 Qt 而言就会阻塞事件循环。
 
 即，我们还需要一个不会阻塞事件循环的等待机制。
 
@@ -219,7 +221,7 @@ AsyncInvoker::Future AsyncInvoker::Invoke(QThread* thread, const Func& func,
 
 ## 四、延迟执行
 
-延迟执行原理上也很简单，将延迟时间一并封装入异步回调事件类中，投送至事件过滤器后，事件过滤器再启动一个定时器事件，在定时器事件中才实际执行回调。
+延迟执行原理上也很简单，将延迟事件一并封装入异步回调事件类中，投送至事件过滤器后，事件过滤器再启动一个定时器事件，在定时器事件中才实际执行回调。
 
 考虑到性能问题，此处不应为了执行一个回调函数就创建一个 [QTimer](https://doc.qt.io/qt-5/qtimer.html) 定时器对象，并绑定信号槽。
 
@@ -321,13 +323,13 @@ bool WaitUntil(const std::chrono::time_point<Clock, Duration>& timeout_time,
 具体实现不再赘述，本例思路如下：
 
 - `WaitFor` 中，使用 `当前时间 + 延时` 方式转换为 `WaitUntil` 的调用。
-- `WaitUntil` 中，将判断超时封装为回调函数，以转换为 `Wait` 的调用。
+- `WaitUntil` 中，将超时判断封装为回调函数，以转换为 `Wait` 的调用。
 
 ### 5.2 Future 对象的 wait  与 get
 
 `Future` 对象的 `wait()/wait_for()/wait_until()` 可直接调用上述实现。
 
-但 [wait_for()](https://en.cppreference.com/w/cpp/thread/future/wait_for) / [wait_until()](https://en.cppreference.com/w/cpp/thread/future/wait_until) 函数还需返回 [std::future_status](https://en.cppreference.com/w/cpp/thread/future_status) 状态值，因此我们还需要判断该异步事件当前的执行状态。
+但 [wait_for()](https://en.cppreference.com/w/cpp/thread/future/wait_for) / [wait_until()](https://en.cppreference.com/w/cpp/thread/future/wait_until) 函数需要返回 [std::future_status](https://en.cppreference.com/w/cpp/thread/future_status) 状态值，因此我们还需要判断该异步事件当前的执行状态。
 
 由于要避免阻塞事件循环，我们不能直接调用 [std::future](https://en.cppreference.com/w/cpp/thread/future) 的对应函数，因此需要自行封装执行状态。
 
@@ -358,7 +360,7 @@ std::future_status AsyncInvoker::Future::status() const {
 
 ## 六、范例代码
 
-上文中的代码，已提交至 [GitHub: ZgblKylin/KtUtils](https://github.com/ZgblKylin/KtUtils) 仓库。
+上文中的代码，已提交至 [GitHub: ZgblKylin/KtUtils](https://github.com/ZgblKylin/KtUtils) 仓库的 [AsyncInvoker 分支](https://github.com/ZgblKylin/KtUtils/tree/AsyncInvoker)。
 
 该仓库提供 CMake 和 QMake 两种使用方式，支持静态链接和动态链接（QMake 还提供源码包含）。
 
