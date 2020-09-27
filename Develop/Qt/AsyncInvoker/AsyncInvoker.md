@@ -481,5 +481,6 @@ QMetaObject::invokeMethod(receiver, [timeout]{
     ...
   }, Qt::QueuedConnection);
 ```
+怎么说呢?放着 `QMetaCallEvent` 的正道不走，非要为了优雅玩花活，结果玩出了一个本不应该有的坑……
 
-怎么说呢?各取所需吧……反正我是懒得再把 [QMetaObject::invokeMethod](https://doc.qt.io/qt-5/qmetaobject.html#invokeMethod-4) 二次封装上延时接口的，毕竟大多时候只需要异步投送功能就行了，延时部分封一个 `WaitFor` 足够了。
+建议有异步延迟执行的需求时，老老实实走最正统的 [QMetaObject::invokeMethod](https://doc.qt.io/qt-5/qmetaobject.html#invokeMethod-4) 吧，无非是封装个 `WaitFor` 方法，多写一行代码来延时罢了。
