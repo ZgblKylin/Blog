@@ -408,3 +408,78 @@ else:CONFIG(debug, debug|release): LIBS += -lKtUtilsd
 DESTDIR = KtUtils/bin
 INCLUDEPATH += KtUtils/include
 ```
+
+
+
+## 七、QTimer::singleShot
+
+### 7.1 功能对比
+
+笔者之前写了5年的 Qt 5.3，所以形成了一定的思维定势，加上 Qt 极端注重兼容性，基本不在大版本内做大更新，所以忽略了某些问题……
+
+就是 Qt 5.4 其实算 breaking change，只是不破坏老代码兼容性。5.4 开始，API 设计全面提升到 C++11了，于是很多 API 都引入了 Functor 版本。
+
+5.4 的 [QTimer::singleShot](https://doc.qt.io/qt-5/qtimer.html#singleShot-5) 加入了 Functor+Args 的接口，接口设计和功能与我文中的几乎一致。
+
+但我试用了，发现有一个坑——无法在非 Qt 线程中调用 [QTimer::singleShot](https://doc.qt.io/qt-5/qtimer.html#singleShot-5)，此场景下该函数不会被执行。
+
+但 Qt 的事件循环机制是不应该有这问题的，因为 Qt 的异步事件的处理（底层为 [QCoreApplication::postEvent](https://doc.qt.io/qt-5/qcoreapplication.html#postEvent)）只取决于接收者的事件循环，对发送者无任何要求。典型例子就是信号槽，你可以在任何位置发信号，甚至在类似中断的 catch 块、signal 函数回调等这些特殊位置发信号。
+
+那么 [QTimer::singleShot](https://doc.qt.io/qt-5/qtimer.html#singleShot-5) 的这个问题是怎么出现的呢?这需要我们对比下两个方案的实现方式。
+
+
+
+### 7.2 问题分析
+
+**我的方案：**
+
+- 人工仿造 `QMetaCallEvent`；
+- 通过 [QCoreApplication::postEvent](https://doc.qt.io/qt-5/qcoreapplication.html#postEvent) 投递事件；
+- receiver 接收事件后，再根据 timeout 参数来决定是否需要延时，若需要，则再通过 [startTimer](https://doc.qt.io/qt-5/qobject.html#startTimer) 转发至 [timerEvent](https://doc.qt.io/qt-5/qobject.html#timerEvent) 事件。
+
+
+
+**[QTimer::singleShot](https://doc.qt.io/qt-5/qtimer.html#singleShot-5) 的方案：**
+
+该方案比较取巧，把 invoke 和 timeout 两个动作合并到一起了，然后比起我的方案还不需要给接收线程外挂一个 filter 处理器，整体实现上的确更加优雅，但也导致了此处的问题。
+
+- 建立一个 `QSingleShotTimer` 对象，该对象本身承担了 invoke 功能，同时继承自 [QObject](https://doc.qt.io/qt-5/qobject.html)，来一并处理延时功能；
+- 直接在调用线程对该对象执行 [startTimer](https://doc.qt.io/qt-5/qobject.html#startTimer) 操作——因为此操作不能跨线程调用；
+- 通过 [moveToThread](https://doc.qt.io/qt-5/qobject.html#moveToThread) 将其移入接收者线程，则已经启动的定时器会在该线程自动重新开启；
+- 不用管了，也不需要做啥 [post]((https://doc.qt.io/qt-5/qcoreapplication.html#postEvent))，把调用请求投送到另一个线程，以及延迟执行，都通过 [moveToThread](https://doc.qt.io/qt-5/qobject.html#moveToThread) 这步一石二鸟了；
+- 在 [timerEvent](https://doc.qt.io/qt-5/qobject.html#timerEvent) 中直接 invoke 函数即可，多么优雅。
+
+唯一纰漏在于，**非 Qt 线程（无 Qt 事件循环的线程）中无法启动定时器**！
+
+此时， [moveToThread](https://doc.qt.io/qt-5/qobject.html#moveToThread) 做的“*停止原线程中的定时器，移动对象所有权到新线程后，在新线程中自动注册定时器*”的操作，一开始就被堵死了。
+
+于是这个定时器永远跑不起来，这个函数永远不会被执行。
+
+对了，顺带还引发一个额外的副作用——如果你这个 functor 是捕获了变量的 lambda，那么捕获的变量也就释放不掉了——也不是严格意义上的*野指针*化了，因为在进程退出前，还是会析构掉这个 `QSingleShotTimer` 对象的。
+
+
+
+### 7.3 替代方案
+
+那么，为了避开这个坑，难道我们就一定要重复造轮子了吗?
+
+也不是，Qt 还是有一个老老实实走 [QCoreApplication::postEvent](https://doc.qt.io/qt-5/qcoreapplication.html#postEvent) 投递 `QMetaCallEvent` 的实现的。
+
+那就是 [QMetaObject::invokeMethod](https://doc.qt.io/qt-5/qmetaobject.html#invokeMethod-4)。
+
+只是延迟执行功能就得自己造轮子了：
+
+```c++
+QMetaObject::invokeMethod(receiver, [timeout]{
+    // 以下延时也可通过我前文封装的 WaitFor 函数实现
+    auto start = std::chrono::steady_clock::now();
+    std::chrono::milliseconds duration{timeout};
+    while (std::chrono::steady_clock::now() < (start + duration)) {
+      QCoreApplication::processEvents();
+    }
+
+    ...
+  }, Qt::QueuedConnection);
+```
+
+怎么说呢?各取所需吧……反正我是懒得再把 [QMetaObject::invokeMethod](https://doc.qt.io/qt-5/qmetaobject.html#invokeMethod-4) 二次封装上延时接口的，毕竟大多时候只需要异步投送功能就行了，延时部分封一个 `WaitFor` 足够了。
